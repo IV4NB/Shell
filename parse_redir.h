@@ -38,7 +38,6 @@ static void parse_redirections(char **args,  char **file_in, char **file_out){
                 args--;
             } else {
                 /* Syntax error */
-                fprintf(stderr, "syntax error in redirection\n");
                 args_start[0] = NULL; // Do nothing
             }
         } else {

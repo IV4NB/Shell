@@ -19,6 +19,9 @@ Some code adapted from "Fundamentos de Sistemas Operativos", Silberschatz et al.
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 // ----------- ENUMERATIONS ---------------------------------------------
 enum status { SUSPENDED, SIGNALED, EXITED, CONTINUED};
