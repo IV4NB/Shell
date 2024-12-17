@@ -14,7 +14,7 @@ Some code adapted from "Fundamentos de Sistemas Operativos", Silberschatz et al.
 #include <string.h>
 #include <malloc.h>
 #include "job_control.h"
-
+#define MAX_LINE 256 /* Longitud máxima de línea permitida por comando */
 
 // -----------------------------------------------------------------------
 //  get_command() reads in the next command line, separating it into distinct tokens
@@ -22,7 +22,7 @@ Some code adapted from "Fundamentos de Sistemas Operativos", Silberschatz et al.
 //  null-terminated string.
 // -----------------------------------------------------------------------
 
-void get_command(char *inputBuffer, int size, char *args[], int *background)
+void get_command(char *inputBuffer, int size, char *args[], int *background, int *respawnable)
 {
     int length; /* # of characters in the command line */
     int i;      /* loop index for accessing inputBuffer array */
@@ -64,8 +64,9 @@ void get_command(char *inputBuffer, int size, char *args[], int *background)
             args[ct] = NULL; /* no more arguments to this command */
             break;
         default :             /* some other character */
-            if (inputBuffer[i] == '&') { // background indicator
-                *background  = 1;
+            if (inputBuffer[i] == '&' || inputBuffer[i] == '+') { // background indicator
+                if (inputBuffer[i] == '+') *respawnable = 1;
+                *background = 1;
                 if (start != -1) {
                     args[ct] = &inputBuffer[start];     
                     ct++;
@@ -95,6 +96,18 @@ job * new_job(pid_t pid, const char * command, enum job_state state)
     aux->command = strdup(command);
     aux->next = NULL;
     return aux;
+}
+
+void add_resp_job (job *list, job *item, char **args)
+{
+    job * aux = list->next;
+    item->args = (char**)malloc(MAX_LINE*sizeof(char)); //reservamos mem para los args
+    list->next = item;
+    item->next = aux;
+    for (int i=0; args[i]; i++){
+    	item->args[i] = strdup(args[i]); //strdup hace una copia de la cadena de texto
+    }
+    list->pgid++;
 }
 
 // -----------------------------------------------------------------------
@@ -202,4 +215,3 @@ void mask_signal(int signal, int block)
     sigaddset(&mask, signal);
     sigprocmask(block, &mask, NULL); // block: SIG_BLOCK/SIG_UNBLOCK
 }
-

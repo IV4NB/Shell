@@ -26,52 +26,88 @@ Dept. Arquitectura de Computadores - UMA
 // Lista global para almacenar los trabajos
 job *job_list;
 
-// Manejador de la señal SIGCHLD, que se activa cuando un proceso hijo cambia de estado
+void sighup_handler(int sig) {
+    printf("ola");
+    FILE *fp;
+    fp=fopen("hup.txt","w"); // abre un fichero en modo 'append'
+    fprintf(fp, "SIGHUP recibido.\n"); //escribe en el fichero
+    fclose(fp);
+}
+
+/**
+ * Manejador de la señal SIGCHLD
+ * Se activa cuando un proceso hijo cambia de estado: finaliza, se suspende o continúa.
+ * Controla trabajos en segundo plano, incluyendo los trabajos respawnable.
+ */
 void sigchld_handler(int sig) {
-    int status_c;              // Estado del proceso hijo
-    pid_t pid_c;               // PID del proceso hijo
-    int info_c;                // Información adicional sobre el estado del proceso
-    enum status status_res_c;  // Resultado del análisis del estado
+    int pid_c, pid_resp;
+    int wstatus, info, grupo;
+    job *tarea;
 
-    // Recorremos todos los procesos hijos que han cambiado de estado
-    while ((pid_c = waitpid(-1, &status_c, WNOHANG | WUNTRACED | 8)) > 0) {
-        // Analizar el estado del proceso hijo
-        status_res_c = analyze_status(status_c, &info_c);
+    block_SIGCHLD(); // Bloquear señales SIGCHLD para evitar condiciones de carrera
 
-        // Imprimir información sobre el proceso finalizado
-        if (status_res_c != CONTINUED){ // Si el proceso ha acabado o ha sido señalizado
-            printf(VERDE "\nBackground process %d finished: %s\n" RESET, pid_c, status_strings[status_res_c]);
-        fflush(stdout); // Forzar la salida a la terminal inmediatamente
-        // Reimprimir el prompt para que el usuario pueda continuar escribiendo
-        printf(AZUL "COMMAND->" RESET);
-        fflush(stdout);
+    while ((pid_c = waitpid(-1, &wstatus, WNOHANG | WUNTRACED | 8)) > 0) {
+
+        // Obtener el estado del proceso
+        int status_res = analyze_status(wstatus, &info);
+        tarea = get_item_bypid(job_list, pid_c);
+
+        if (tarea == NULL) {
+            printf(ROJO "Error: No se encontró la tarea con PID %d\n" RESET, pid_c);
+            continue;
         }
 
-        // Si el proceso ha terminado o ha sido señalizado, actualizar la lista de trabajos
-        if (status_res_c == EXITED || status_res_c == SIGNALED) {
-            job *finished_job = get_item_bypid(job_list, pid_c);
-            if (finished_job) {
-                delete_job(job_list, finished_job); // Eliminar el trabajo de la lista
-            }
-        } else if (status_res_c == SUSPENDED) { // Si el proceso ha sido detenido
-            job *suspended_job = get_item_bypid(job_list, pid_c);
-            if (suspended_job) {
-                suspended_job->state = STOPPED; // Actualizar el estado del trabajo
-            }
-        } else if (status_res_c == CONTINUED) { // Si un proceso suspendido recibe la señal para continuar
-			job *continued_job = get_item_bypid(job_list, pid_c);
-			if (continued_job && continued_job->state == STOPPED) {
-				continued_job->state = BACKGROUND; // Cambiar estado a background
-			}
-		}
+        // Imprimir información del proceso
+        printf(VERDE "%s process %d finished: %s\n" RESET,state_strings[tarea->state], pid_c, status_strings[status_res]);
 
+        if (status_res == SUSPENDED) { 
+            // Si el proceso se suspende, actualizar su estado
+            tarea->state = STOPPED;
+
+        } else if (status_res == EXITED || status_res == SIGNALED) {
+            if (tarea->state == RESPAWNABLE) {
+                // Relanzar el proceso respawnable
+                pid_resp = fork();
+                if (pid_resp == -1) {
+                    perror(ROJO "Error: No se pudo relanzar el proceso respawnable\n" RESET);
+                } else if (pid_resp == 0) { // Proceso hijo
+                    grupo = getpid();
+                    setpgid(pid_resp, grupo);
+                    restore_terminal_signals(); // Restaurar señales predeterminadas
+
+                    printf(VERDE "Respawnable job relaunched: command: %s, new pid: %d\n" RESET,
+                           tarea->command, grupo);
+                    printf(AZUL "COMMAND->" RESET);
+                    fflush(stdout);
+                    execvp(tarea->command, tarea->args);
+                    perror(ROJO "execvp failed in respawnable job" RESET);
+                    exit(EXIT_FAILURE);
+                } else { // Proceso padre
+                    setpgid(pid_resp, pid_resp);
+                    tarea->pgid = pid_resp; // Actualizar el PGID del trabajo
+                }
+            } else {
+                // Eliminar el trabajo si no es respawnable
+                if (delete_job(job_list, tarea) != 1) {
+                    printf(ROJO "Error: No se pudo eliminar la tarea con PID %d\n" RESET, pid_c);
+                }
+            }
+
+        } else if (status_res == CONTINUED) { 
+            // Si el proceso continúa, actualizar su estado
+            tarea->state = BACKGROUND;
+        }
     }
+    unblock_SIGCHLD(); // Desbloquear señales SIGCHLD
 }
+
+
 
 int main(void)
 {
     char inputBuffer[MAX_LINE]; /* Buffer para almacenar el comando introducido */
     int background;             /* Indica si un comando debe ejecutarse en segundo plano (&) */
+    int respawnable;            /* Indica si un comando debe revivir al morir (+) */
     char *args[MAX_LINE/2];     /* Lista de argumentos del comando */
 
     // Variables para el control de procesos
@@ -88,6 +124,7 @@ int main(void)
 
     // Registrar el manejador para la señal SIGCHLD
     signal(SIGCHLD, sigchld_handler);
+    signal(SIGHUP, sighup_handler);
 
     // Ignorar señales en el shell principal
     ignore_terminal_signals();
@@ -99,7 +136,7 @@ int main(void)
         fflush(stdout); // Asegurar que el prompt se imprime inmediatamente
 
         // Obtener el comando del usuario
-        get_command(inputBuffer, MAX_LINE, args, &background);
+        get_command(inputBuffer, MAX_LINE, args, &background, &respawnable);
 
         if (args[0] == NULL) continue; /* Ignorar comandos vacíos */
 
@@ -164,6 +201,7 @@ int main(void)
 
             // Cambiamos el estado del trabajo a FOREGROUND
             fg_job->state = FOREGROUND;
+            respawnable = 0;
             // Ya no necesitamos acceso exclusivo a la lista
             unblock_SIGCHLD();
 
@@ -225,16 +263,17 @@ int main(void)
                 continue;
             }
 
-            // Verificamos que el trabajo esté suspendido (STOPPED).
-            if (bg_job->state != STOPPED) {
+            // Verificamos que el trabajo esté suspendido (STOPPED) o sea respawnable (RESPAWNABLE).
+            if (bg_job->state != STOPPED && bg_job->state != RESPAWNABLE) {
                 // Si no está suspendido, no podemos ponerlo en bg.
-                printf(ROJO "bg: el trabajo seleccionado no está suspendido\n" RESET);
+                printf(ROJO "bg: el trabajo seleccionado no está suspendido ni es respawnable\n" RESET);
                 unblock_SIGCHLD();
                 continue;
             }
 
             // Cambiamos el estado a BACKGROUND
             bg_job->state = BACKGROUND;
+            respawnable = 0;
             // Ya no necesitamos acceso exclusivo a la lista
             unblock_SIGCHLD();
 
@@ -242,7 +281,7 @@ int main(void)
             killpg(bg_job->pgid, SIGCONT);
 
             // Indicamos al usuario que el trabajo se ha reanudado en segundo plano.
-            printf(VERDE "Tarea %d reanudada en segundo plano: PID: %d, Command: %s\n" RESET, 
+            printf(VERDE "Tarea %d reanudada en segundo plano: PID: %d, Command: %s\n" RESET,
                    n, bg_job->pgid, bg_job->command);
 
             continue; // Volver al bucle principal
@@ -334,13 +373,17 @@ int main(void)
                     }
 
                 } else { /* Comando en segundo plano */
-					// Añadir el proceso en segundo plano a la lista de trabajos
-					njob = new_job(pid_fork, args[0], BACKGROUND);
-					block_SIGCHLD();
-                    add_job(job_list, njob); /* Bloqueamos y desbloqueamos la lista para evitar condiciones de carrera */
-					unblock_SIGCHLD();
-
-                    printf(VERDE "Background process running -> PID: %d, Command: %s\n" RESET, pid_fork, args[0]);
+                    block_SIGCHLD();
+					if (respawnable == 1) {
+                        njob = new_job(pid_fork, args[0], RESPAWNABLE);
+                        add_resp_job(job_list, njob, args);
+                        printf(VERDE "Respawnable process running -> PID: %d, Command: %s\n" RESET, pid_fork, args[0]);
+                    } else {
+                        njob = new_job(pid_fork, args[0], BACKGROUND);
+                        add_job(job_list, njob); /* Bloqueamos y desbloqueamos la lista para evitar condiciones de carrera */
+                        printf(VERDE "Background process running -> PID: %d, Command: %s\n" RESET, pid_fork, args[0]);
+                    }
+                    unblock_SIGCHLD();
                 }
                 break;
         }

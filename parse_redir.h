@@ -15,6 +15,7 @@
 //
 // For a valid redirection, a blank space is required before and after
 // redirection operators '<' or '>'.
+// Iván Ballesteros Fernández - 24-25 - 2ºGCIA
 // --------------------------------------------------------------
 
 static void parse_redirections(char **args,  char **file_in, char **file_out){
