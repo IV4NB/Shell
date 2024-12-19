@@ -123,6 +123,7 @@ void *alarm_thread(void *arg) {
     } else {
         printf(MARRON "Proceso %d matado por temporizador\n" RESET, args->grupo);  // Informamos al usuario
     }
+    free(args);  // Liberamos la memoria de los argumentos
     return NULL;
 }
 
@@ -130,8 +131,8 @@ void *alarm_thread(void *arg) {
 int main(void)
 {
     char inputBuffer[MAX_LINE]; /* Buffer para almacenar el comando introducido */
-    int background;             /* Indica si un comando debe ejecutarse en segundo plano (&) */
-    int respawnable;            /* Indica si un comando debe revivir al morir (+) */
+    int background = 0;             /* Indica si un comando debe ejecutarse en segundo plano (&) */
+    int respawnable = 0;            /* Indica si un comando debe revivir al morir (+) */
     char *args[MAX_LINE/2];     /* Lista de argumentos del comando */
 
     // Variables para el control de procesos
@@ -393,6 +394,7 @@ int main(void)
             case -1: // Error al crear el proceso
                 perror(ROJO "Error: fork() failed\n" RESET);
                 exit(-1);
+
             case 0: // Proceso hijo
                 restore_terminal_signals(); /* Restaurar señales por defecto */
                 new_process_group(bg_fork); /* Crear un nuevo grupo de procesos */
@@ -400,9 +402,11 @@ int main(void)
                 exit(1); // Si falla, salimos con error
 
             default: /* Proceso padre */
+                block_SIGCHLD();
                 njob = new_job(bg_fork, args[0], BACKGROUND);
                 add_job(job_list, njob); /* Bloqueamos y desbloqueamos la lista para evitar condiciones de carrera */
                 printf(VERDE "Background process running -> PID: %d, Command: %s\n" RESET, bg_fork, args[0]);
+                unblock_SIGCHLD();
                 break;
             }
         }
@@ -478,8 +482,10 @@ int main(void)
             default: /* Proceso padre */
 
                 if (thread == 1) { // Si se ha creado un hilo para el temporizador
-                    ThreadArgs args = {seconds, pid_fork}; // Creamos la estructura con los argumentos
-                    pthread_create(&tid, &attr, alarm_thread, &args); // Creamos el hilo
+                    ThreadArgs *args = (ThreadArgs *)malloc(sizeof(ThreadArgs)); // Creamos la estructura con los argumentos
+                    args->tiempo = seconds; // Asignamos el tiempo
+                    args->grupo = pid_fork; // Asignamos el PID del proceso
+                    pthread_create(&tid, &attr, alarm_thread, args); // Creamos el hilo
                     pthread_detach(tid); // Desvinculamos el hilo
                     tid++; // Incrementamos el identificador del hilo
                     thread = 0; // Reiniciamos la variable
