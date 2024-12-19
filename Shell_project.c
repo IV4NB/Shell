@@ -112,6 +112,7 @@ typedef struct ThreadArgs{  // Estructura para pasar argumentos al hilo
 	int grupo;  // esto sera el pid del proceso
 } ThreadArgs;
 
+// Función para el temporizador
 void *alarm_thread(void *arg) {
     ThreadArgs *args = (ThreadArgs *) arg;  // Convertimos el argumento a la estructura
     printf(MARRON "Temporizador activado: %d segundos\n" RESET, args->tiempo);  // Informamos al usuario
@@ -123,6 +124,16 @@ void *alarm_thread(void *arg) {
     } else {
         printf(MARRON "Proceso %d matado por temporizador\n" RESET, args->grupo);  // Informamos al usuario
     }
+    free(args);  // Liberamos la memoria de los argumentos
+    return NULL;
+}
+
+// Función para el delay-thread
+void *delay_thread(void *arg) {
+    ThreadArgs *args = (ThreadArgs *) arg;  // Convertimos el argumento a la estructura
+    printf(MARRON "Delay activado: %d segundos\n" RESET, args->tiempo);  // Informamos al usuario
+    fflush(stdout);
+    sleep(args->tiempo);  // Esperamos el tiempo especificado
     free(args);  // Liberamos la memoria de los argumentos
     return NULL;
 }
@@ -143,7 +154,13 @@ int main(void)
     int pid_shell = getpid(); /* PID del proceso principal (shell) */
 
     int thread = 0; // Indica si se ha creado un hilo para el temporizador
+    int delay = 0; // Indica si se ha introducido delay-thread
     int seconds = 0; // Tiempo de vida del proceso
+    int delay_seconds = 0; // Tiempo de espera del proceso
+
+    int mask = 0; // Indica si se ha introducido mask
+    int tam = 0; // Tamaño de los argumentos de mask
+    char *mask_args[MAX_LINE/2]; // Array para almacenar los argumentos de mask
 
     int bgt = 0; // Indica si se ha introducido bgteam
     pthread_t tid; // Identificador del hilo
@@ -383,6 +400,84 @@ int main(void)
                 args[i - 2] = args[i];
             }
         }
+
+        // Postergar la ejecución del comando en background
+        if (strcmp(args[0], "delay-thread") == 0) {
+            if (!args[1]) { // Si no se especifica un tiempo, informamos y continuamos
+				printf(ROJO "Número de segundos a esperar no especificado\n" RESET);
+				continue;
+			} else if (!args[2]) { // Si no se especifica un comando, informamos y continuamos
+				printf(ROJO "Comando a ejecutar no especificado\n" RESET);
+				continue;
+			}
+
+			if ((atoi(args[1]) > 0) || (strcmp(args[1], "0") == 0 && atoi(args[1]) == 0)) {
+                delay_seconds = atoi(args[1]); // Convertimos el argumento a entero
+                delay = 1; // Indicamos que se ha creado un hilo
+                background = 1; // Indicamos que el comando se ejecutará en segundo plano
+            } else {
+                printf(ROJO "Número de segundos a esperar no válido\n" RESET);
+                continue;
+            }
+
+            // Reformateamos los argumentos para que el comando se ejecute correctamente
+            for (int i = 2; args[i - 2]; i++) {
+                args[i - 2] = args[i];
+            }
+        }
+
+        // Comando interno: enmascarar señales en el hijo
+        if (strcmp(args[0], "mask") == 0) {
+            if (args[1] == NULL) { // No se han incluido señales a enmascarar
+                printf(ROJO "No se ha incluido ninguna señal para enmascarar\n" RESET);
+                continue;
+            }
+
+            // Comprobamos si no hay señales antes del -c
+			if (strcmp(args[1], "-c") == 0) { //No se han incluido señales a enmascarar
+				printf(ROJO "No se ha incluido ninguna señal para enmascarar\n" RESET);
+				continue;
+			}
+			
+            // Comprobamos si se ha incluido el -c
+			int hay_c = 0;
+			for (tam = 0; args[tam]; tam++) {
+				if (strcmp(args[tam],"-c") == 0) {
+					hay_c = 1;
+					break;
+				} 
+				mask_args[tam] = args[tam]; // Array solo con los argumentos de mask
+			}
+			
+			// No se ha incluido el -c
+			if (hay_c == 0) {
+				printf(ROJO "Comando no precedido con -c\n" RESET);
+				continue;
+			}
+			
+			// Comprobamos que los argumentos sean válidos
+			int valido = 1;
+			for (int j = 1; j < tam; j++) { // Empieza j=1 porque j=0 es "mask"
+				if (atoi(mask_args[j]) <= 0) {
+					valido = 0;
+					break;
+				}
+			}
+			if (!valido) {
+				printf(ROJO "Argumentos no válidos para mask\n" RESET);
+				continue;
+			}
+			
+			// Si llegamos aqui es que son válidos
+			for (int j = tam + 1; args[j - (tam + 1)]; j++) { // Eliminamos las posiciones de mask, +1 para quitar -c
+				args[j - (tam + 1)] = args[j];
+			}
+            if (args[0] == NULL) { // No se ha incluido ningún comando
+                printf(ROJO "No se ha incluido ningún comando\n" RESET);
+                continue;
+            }
+			mask = 1;
+		}
         
 		/* =========================    COMANDOS INTERNOS    ========================= */
 
@@ -429,6 +524,11 @@ int main(void)
             case 0: /* Proceso hijo */
                 restore_terminal_signals(); /* Restaurar señales por defecto */
                 new_process_group(pid_fork); /* Crear un nuevo grupo de procesos */
+                if (mask == 1) { // Enmascarar señales si se ha introducido mask
+                    for (int j = 1; j < tam; j++) {
+                        mask_signal(atoi(mask_args[j]), 0);
+                    }
+                }
 
                 // Redirecciones de entrada y salida
                         
@@ -461,6 +561,15 @@ int main(void)
                     close(fd_out); // ya no necesitamos el descriptor original
                 }
 
+                // Delay si se ha introducido delay-thread
+                if (delay == 1) {
+                    ThreadArgs *targs = (ThreadArgs *)malloc(sizeof(ThreadArgs)); // Creamos la estructura con los argumentos
+                    targs->tiempo = delay_seconds; // Asignamos el tiempo
+                    pthread_create(&tid, &attr, delay_thread, targs); // Creamos el hilo
+                    pthread_join(tid, NULL); // Esperamos a que el hilo termine
+                    printf(VERDE "Background process running -> PID: %d, Command: %s\n" RESET, getpid(), args[0]);
+                }
+
                 execvp(args[0], args); /* Intentar ejecutar el comando */
 
                 // Manejo de errores si execvp falla
@@ -489,6 +598,11 @@ int main(void)
                     pthread_detach(tid); // Desvinculamos el hilo
                     tid++; // Incrementamos el identificador del hilo
                     thread = 0; // Reiniciamos la variable
+                }
+
+                if (delay == 1) {
+                    tid++; // Incrementamos el identificador del hilo
+                    delay = 0; // Reiniciamos la variable
                 }
 
                 if (background == 0) { /* Comando en primer plano */
@@ -521,7 +635,9 @@ int main(void)
                     } else {
                         njob = new_job(pid_fork, args[0], BACKGROUND);
                         add_job(job_list, njob); /* Bloqueamos y desbloqueamos la lista para evitar condiciones de carrera */
+                        if (delay != 1) {
                         printf(VERDE "Background process running -> PID: %d, Command: %s\n" RESET, pid_fork, args[0]);
+                        }
                     }
                     unblock_SIGCHLD();
                 }
