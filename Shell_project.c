@@ -4,12 +4,14 @@ UNIX Shell Project
 Sistemas Operativos
 Grados I. Informatica, Computadores & Software
 Dept. Arquitectura de Computadores - UMA
+Iván Ballesteros Fernández - 24-25 - 2ºGCIA
 **/
 
 #include <string.h>   // Para trabajar con cadenas de texto
 #include <errno.h>    // Para manejar errores del sistema
 #include "job_control.h" // Biblioteca personalizada para control de trabajos
 #include "parse_redir.h" // Biblioteca personalizada para parsear redirecciones
+#include "pthread.h" // Biblioteca para trabajar con hilos
 
 // Definiciones para colores en la terminal
 #define ROJO "\x1b[31;1;1m"
@@ -26,11 +28,11 @@ Dept. Arquitectura de Computadores - UMA
 // Lista global para almacenar los trabajos
 job *job_list;
 
+// Manejador de la señal SIGHUP
 void sighup_handler(int sig) {
-    printf("ola");
     FILE *fp;
-    fp=fopen("hup.txt","w"); // abre un fichero en modo 'append'
-    fprintf(fp, "SIGHUP recibido.\n"); //escribe en el fichero
+    fp=fopen("hup.txt","a"); // Abre un fichero en modo 'append'
+    fprintf(fp, "SIGHUP recibido.\n"); // Escribe en el fichero
     fclose(fp);
 }
 
@@ -58,7 +60,10 @@ void sigchld_handler(int sig) {
         }
 
         // Imprimir información del proceso
-        printf(VERDE "%s process %d finished: %s\n" RESET,state_strings[tarea->state], pid_c, status_strings[status_res]);
+        if (status_res != CONTINUED) {
+            printf(VERDE "%s process %d finished: %s\n" RESET,state_strings[tarea->state], pid_c, status_strings[status_res]);
+            fflush(stdout);
+        }
 
         if (status_res == SUSPENDED) { 
             // Si el proceso se suspende, actualizar su estado
@@ -74,7 +79,6 @@ void sigchld_handler(int sig) {
                     grupo = getpid();
                     setpgid(pid_resp, grupo);
                     restore_terminal_signals(); // Restaurar señales predeterminadas
-
                     printf(VERDE "Respawnable job relaunched: command: %s, new pid: %d\n" RESET,
                            tarea->command, grupo);
                     printf(AZUL "COMMAND->" RESET);
@@ -88,6 +92,7 @@ void sigchld_handler(int sig) {
                 }
             } else {
                 // Eliminar el trabajo si no es respawnable
+
                 if (delete_job(job_list, tarea) != 1) {
                     printf(ROJO "Error: No se pudo eliminar la tarea con PID %d\n" RESET, pid_c);
                 }
@@ -102,6 +107,25 @@ void sigchld_handler(int sig) {
 }
 
 
+typedef struct ThreadArgs{  // Estructura para pasar argumentos al hilo
+	int tiempo;  // esto sera el tiempo de vida del proceso
+	int grupo;  // esto sera el pid del proceso
+} ThreadArgs;
+
+void *alarm_thread(void *arg) {
+    ThreadArgs *args = (ThreadArgs *) arg;  // Convertimos el argumento a la estructura
+    printf(MARRON "Temporizador activado: %d segundos\n" RESET, args->tiempo);  // Informamos al usuario
+    fflush(stdout);
+    sleep(args->tiempo);  // Esperamos el tiempo especificado
+    int error = killpg(args->grupo, SIGKILL);  // Enviamos la señal SIGKILL al grupo de procesos
+    if (error == -1) {  // Si hay un error, informamos al usuario
+        printf(ROJO "Error al matar el proceso\n" RESET);
+    } else {
+        printf(MARRON "Proceso %d matado por temporizador\n" RESET, args->grupo);  // Informamos al usuario
+    }
+    return NULL;
+}
+
 
 int main(void)
 {
@@ -111,11 +135,19 @@ int main(void)
     char *args[MAX_LINE/2];     /* Lista de argumentos del comando */
 
     // Variables para el control de procesos
-    int pid_fork, pid_wait; /* PIDs para el proceso creado y esperado */
+    int pid_fork, pid_wait, bg_fork; /* PIDs para el proceso creado y esperado */
     int status;             /* Estado devuelto por wait */
     enum status status_res; /* Resultado del análisis del estado */
     int info;               /* Información procesada por analyze_status */
     int pid_shell = getpid(); /* PID del proceso principal (shell) */
+
+    int thread = 0; // Indica si se ha creado un hilo para el temporizador
+    int seconds = 0; // Tiempo de vida del proceso
+
+    int bgt = 0; // Indica si se ha introducido bgteam
+    pthread_t tid; // Identificador del hilo
+	pthread_attr_t attr; // Atributos del hilo
+	pthread_attr_init(&attr); // Inicializar los atributos del hilo
     
     job *njob; /* Variable para almacenar un nuevo trabajo */
 
@@ -124,6 +156,7 @@ int main(void)
 
     // Registrar el manejador para la señal SIGCHLD
     signal(SIGCHLD, sigchld_handler);
+    // Registrar el manejador para la señal SIGHUP
     signal(SIGHUP, sighup_handler);
 
     // Ignorar señales en el shell principal
@@ -173,6 +206,46 @@ int main(void)
 			}
 			unblock_SIGCHLD(); // Desbloqueamos las señales SIGCHLD
 			continue; // Volver al inicio del bucle principal
+        }
+
+        // Comando interno: mostrar el trabajo actual (currjob)
+        if (strcmp(args[0], "currjob") == 0) {
+            if (args[1] != NULL) {
+                printf(ROJO "currjob: Argumento inválido\n" RESET);
+                continue; // Argumento inválido, volver al bucle principal
+            }
+            block_SIGCHLD(); // Bloqueamos las señales SIGCHLD para evitar condiciones de carrera
+            if (empty_list(job_list)) {
+                printf(ROJO "No hay trabajo actual\n" RESET); // Si la lista está vacía, no hay trabajo actual
+                unblock_SIGCHLD();
+                continue; // Volver al bucle principal
+            }
+            job *currjob = get_item_bypos(job_list, 1); // Obtenemos el primer trabajo de la lista
+            if (currjob == NULL) {
+                printf(ROJO "Error: No se pudo obtener el trabajo actual\n" RESET);
+                unblock_SIGCHLD();
+                continue; // Volver al bucle principal
+            }
+            printf(VERDE "Trabajo actual: PID=%d command=%s\n" RESET, currjob->pgid, currjob->command);
+            unblock_SIGCHLD(); // Desbloqueamos las señales SIGCHLD
+            continue; // Volver al inicio del bucle principal
+        }
+
+        // Comando interno: lanzar n veces el comando en bacground (bgteam)
+        if (strcmp(args[0], "bgteam") == 0) {
+            if (args[1] == NULL) {
+                printf(ROJO "bgteam: Argumento inválido\n" RESET);
+                continue; // Argumento inválido, volver al bucle principal
+            }
+            if (atoi(args[1]) <= 0) {
+                printf(ROJO "bgteam: Argumento inválido\n" RESET);
+                continue; // Argumento inválido, volver al bucle principal
+            }
+            bgt = atoi(args[1]); // Convertimos el argumento a entero
+            // Reformateamos los argumentos para que el comando se ejecute correctamente
+            for (int i = 2; args[i - 2]; i++) {
+                args[i - 2] = args[i];
+            }
         }
 
         // Comando interno: poner en primer plano un trabajo (fg)
@@ -283,11 +356,63 @@ int main(void)
             // Indicamos al usuario que el trabajo se ha reanudado en segundo plano.
             printf(VERDE "Tarea %d reanudada en segundo plano: PID: %d, Command: %s\n" RESET,
                    n, bg_job->pgid, bg_job->command);
-
             continue; // Volver al bucle principal
         }
 
+        // Comando interno: limitacion de tiempo de vida
+        if (strcmp(args[0], "alarm-thread") == 0) {
+			if (!args[1]) { // Si no se especifica un tiempo, informamos y continuamos
+				printf(ROJO "Número de segundos a esperar no especificado\n" RESET);
+				continue;
+			} else if (!args[2]) { // Si no se especifica un comando, informamos y continuamos
+				printf(ROJO "Comando a ejecutar no especificado\n" RESET);
+				continue;
+			}
+
+			if ((atoi(args[1]) > 0) || (strcmp(args[1], "0") == 0 && atoi(args[1]) == 0)) {
+                seconds = atoi(args[1]); // Convertimos el argumento a entero
+                thread = 1; // Indicamos que se ha creado un hilo
+            } else {
+                printf(ROJO "Número de segundos a esperar no válido\n" RESET);
+                continue;
+            }
+
+            // Reformateamos los argumentos para que el comando se ejecute correctamente
+            for (int i = 2; args[i - 2]; i++) {
+                args[i - 2] = args[i];
+            }
+        }
+        
 		/* =========================    COMANDOS INTERNOS    ========================= */
+
+		/* =========================    BGTEAM    ========================= */
+
+        for (int i = 0; i < bgt; i++) {
+            bg_fork = fork();
+            switch (bg_fork) {
+            case -1: // Error al crear el proceso
+                perror(ROJO "Error: fork() failed\n" RESET);
+                exit(-1);
+            case 0: // Proceso hijo
+                restore_terminal_signals(); /* Restaurar señales por defecto */
+                new_process_group(bg_fork); /* Crear un nuevo grupo de procesos */
+                execvp(args[0], args); /* Intentar ejecutar el comando */
+                exit(1); // Si falla, salimos con error
+
+            default: /* Proceso padre */
+                njob = new_job(bg_fork, args[0], BACKGROUND);
+                add_job(job_list, njob); /* Bloqueamos y desbloqueamos la lista para evitar condiciones de carrera */
+                printf(VERDE "Background process running -> PID: %d, Command: %s\n" RESET, bg_fork, args[0]);
+                break;
+            }
+        }
+
+        if (bgt > 0) { // Si se ha introducido bgteam, reiniciamos la variable
+            bgt = 0;
+            continue; // Volver al inicio del bucle principal
+        }
+
+		/* =========================    BGTEAM    ========================= */
 
         // Crear un nuevo proceso con fork
         pid_fork = fork();
@@ -351,6 +476,15 @@ int main(void)
                 }
 
             default: /* Proceso padre */
+
+                if (thread == 1) { // Si se ha creado un hilo para el temporizador
+                    ThreadArgs args = {seconds, pid_fork}; // Creamos la estructura con los argumentos
+                    pthread_create(&tid, &attr, alarm_thread, &args); // Creamos el hilo
+                    pthread_detach(tid); // Desvinculamos el hilo
+                    tid++; // Incrementamos el identificador del hilo
+                    thread = 0; // Reiniciamos la variable
+                }
+
                 if (background == 0) { /* Comando en primer plano */
                     set_terminal(pid_fork); /* Asignar terminal al hijo */
                     pid_wait = waitpid(pid_fork, &status, WUNTRACED);
@@ -385,7 +519,6 @@ int main(void)
                     }
                     unblock_SIGCHLD();
                 }
-                break;
         }
     }
 }
