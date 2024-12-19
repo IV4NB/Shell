@@ -12,6 +12,7 @@ Iván Ballesteros Fernández - 24-25 - 2ºGCIA
 #include "job_control.h" // Biblioteca personalizada para control de trabajos
 #include "parse_redir.h" // Biblioteca personalizada para parsear redirecciones
 #include "pthread.h" // Biblioteca para trabajar con hilos
+#include "time.h"   // Para trabajar con el tiempo"
 
 // Definiciones para colores en la terminal
 #define ROJO "\x1b[31;1;1m"
@@ -153,6 +154,9 @@ int main(void)
     int info;               /* Información procesada por analyze_status */
     int pid_shell = getpid(); /* PID del proceso principal (shell) */
 
+    int etime = 0; // Indica si se ha introducido etime
+    struct timespec start_time, end_time; // Variables para medir el tiempo de ejecución
+
     int thread = 0; // Indica si se ha creado un hilo para el temporizador
     int delay = 0; // Indica si se ha introducido delay-thread
     int seconds = 0; // Tiempo de vida del proceso
@@ -205,7 +209,9 @@ int main(void)
         // Comando interno: cambiar de directorio (cd)
         if (strcmp(args[0], "cd") == 0) {
             if (args[1] == NULL) {
-                chdir(getenv("HOME")); // Cambiar al directorio HOME
+                if (chdir(getenv("HOME"))) { // Cambiar al directorio HOME
+                    printf(ROJO "Error: No se pudo cambiar al directorio HOME\n" RESET);
+                }
             } else {
                 if (chdir(args[1]) == -1) { // Cambiar al directorio especificado
                     printf(ROJO "Error: Directorio no encontrado\n" RESET);
@@ -213,6 +219,21 @@ int main(void)
             }
             continue; // Volver al inicio del bucle principal
         }
+
+        // Comando interno: contador de tiempo de ejecución (etime)
+        if(strcmp(args[0], "etime") == 0) { 
+			if (args[1] == NULL) { // Si no se especifica un comando, informamos y continuamos
+                printf(ROJO "No se ha especificado un comando\n" RESET);
+                continue;
+            } 
+            background = 0; // Indicamos que el comando se ejecutará en primer plano
+            respawnable = 0; // Indicamos que el comando no es respawnable
+            etime = 1; // Indicamos que se ha introducido etime
+			for(int i = 1; args[i - 1]; i++) {
+                args[i - 1] = args[i]; // Reformateamos los argumentos para que el comando se ejecute correctamente
+            }
+			clock_gettime(CLOCK_MONOTONIC, &start_time);
+		}
 
         // Comando interno: mostrar la lista de trabajos (jobs)
 		if (strcmp(args[0], "jobs") == 0) {
@@ -609,6 +630,19 @@ int main(void)
                     set_terminal(pid_fork); /* Asignar terminal al hijo */
                     pid_wait = waitpid(pid_fork, &status, WUNTRACED);
                     set_terminal(pid_shell); /* Devolver terminal al shell */
+                    if (etime == 1) {
+                        if (clock_gettime(CLOCK_MONOTONIC, &end_time) == -1) { // Medir el tiempo de ejecución
+                            perror(ROJO "Error: clock_gettime failed\n" RESET);
+                        }
+                        long int segundos = end_time.tv_sec - start_time.tv_sec; // Calcular el tiempo de ejecución
+                        long int nanosegundos = end_time.tv_nsec - start_time.tv_nsec;
+                        if (nanosegundos < 0) { // Corregir si los nanosegundos son negativos
+                            segundos--;
+                            nanosegundos += 1000000000;
+                        }
+                        printf(MARRON "Tiempo de ejecución: %ld.%09ld segundos\n" RESET, segundos, nanosegundos);
+                        etime = 0; // Reiniciamos la variable
+                    }
                     status_res = analyze_status(status, &info);
 
 					// Comprobamos el estado del hijo
